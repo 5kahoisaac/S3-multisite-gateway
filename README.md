@@ -1,133 +1,223 @@
-# S3 multisite gateway
+## S3 response caching
 
-Serve any single-level subdomain from its matching directory (object prefix) inside one S3-compatible bucket. No per-project route definitions, bucket listing, or copying objects to the container filesystem are required.
+The gateway supports an optional in-memory LRU cache to reduce repeated
+S3 API requests and improve response latency.
 
-## Routing
+Caching is implemented directly in Go without requiring Redis,
+additional Docker services, or a custom Caddy build.
 
-| Incoming request | S3 object key (`S3_BUCKET=static`) |
-|---|---|
-| `http://test1.example.com/` | `test1/index.html` |
-| `http://test1.example.com/assets/app.css` | `test1/assets/app.css` |
-| `http://test2.example.com/` | `test2/index.html` |
-| `http://test3.example.com/docs/` | `test3/docs/index.html` |
+### Architecture
 
-S3 URI examples: `s3://static/test1/index.html`, `s3://static/test2/index.html`.
-A new `testN/` prefix becomes available immediately (provided DNS for `testN.example.com` resolves to the server).
-
-## Quick start
-
-1. Copy the environment template and set your actual S3 storage configuration:
-
-   ```bash
-   cp .env.example .env
-   # Edit .env: BASE_DOMAIN, S3_BUCKET, AWS_REGION, S3_ENDPOINT, credentials.
-   ```
-
-2. Upload static sites to the configured bucket:
-
-   ```bash
-   # Using AWS S3 (omit --endpoint-url for AWS):
-   aws s3 sync ./test1/ s3://static/test1/
-   aws s3 sync ./test2/ s3://static/test2/
-
-   # For S3-compatible providers instead:
-   aws --endpoint-url https://s3.example-storage.com s3 sync ./test1/ s3://static/test1/
-   ```
-
-3. Start the stack:
-
-   ```bash
-   docker compose up -d --build
-   ```
-
-4. Test locally without modifying DNS:
-
-   ```bash
-   curl -i -H 'Host: test1.example.com' http://127.0.0.1:8080/
-   curl -i -H 'Host: test2.example.com' http://127.0.0.1:8080/
-   curl -i -H 'Host: test1.example.com' http://127.0.0.1:8080/assets/app.css
-   curl -i http://127.0.0.1:8080/_health
-   ```
-
-   In production point a wildcard DNS A/AAAA record (`*.example.com`) at your proxy/server.
-
-## Environment variables
-
-| Name | Required | Description |
-|---|---|---|
-| `BASE_DOMAIN` | yes | Parent domain, e.g. `example.com`. Only one subdomain label is accepted. |
-| `S3_BUCKET` | yes | Bucket name, e.g. `static`. |
-| `AWS_REGION` | yes | `us-east-1` for AWS/MinIO, or `auto` for providers such as R2. |
-| `S3_ENDPOINT` | no | Custom S3 API URL, blank for AWS itself. |
-| `S3_FORCE_PATH_STYLE` | no | `true` for many S3-compatible providers, `false` for AWS S3. |
-| `AWS_ACCESS_KEY_ID` | conditional | Key if not using IAM roles or another SDK credential source. |
-| `AWS_SECRET_ACCESS_KEY` | conditional | Secret for the key above. |
-| `AWS_SESSION_TOKEN` | conditional | Temporary credential session token. |
-| `HTTP_PORT` | no | Caddy host HTTP port; default `8080`. |
-| `PORT` | no | Internal gateway port; Compose pins it to `8080`. |
-| `SPA_FALLBACK` | no | Default `false`. Retry `test1/index.html` for missing extensionless routes. |
-| `DEFAULT_CACHE_CONTROL` | no | Default `public, max-age=60` when S3 metadata is absent. |
-
-### How `.env` works
-
-`Dockerfile` creates the application image and **does not contain secrets or load `.env` during build**. `compose.yaml` uses `env_file: .env` to inject environment values **at container start**. This avoids embedding S3 keys in image layers. Compose also reads `.env` to interpolate `HTTP_PORT`.
-
-Without Compose, run directly:
-
-```bash
-docker build -t s3-multisite .
-docker run --rm -p 8080:8080 --env-file .env s3-multisite
-# Test: curl -H 'Host: test1.example.com' http://127.0.0.1:8080/
+```text
+Browser
+   |
+   | Cache-Control: public, max-age=300
+   v
+Coolify Reverse Proxy
+   |
+   v
+Caddy
+   |
+   v
+Go S3 Gateway
+   |
+   +-- Cache HIT --> Return cached response
+   |
+   +-- Cache MISS
+         |
+         v
+       S3 Bucket
+         |
+         v
+       Store in memory (if eligible)
+         |
+         v
+       Return response
 ```
 
-### Git and Docker ignore rules
+### Configuration
 
-- `.gitignore` excludes local `.env` credentials, certificates, generated Go binaries, test coverage, logs, caches, and editor/OS files. `.env.example` stays trackable as a safe configuration template.
-- `.dockerignore` excludes `.git`, `.gitignore`, GitHub configuration, secrets (including `.env.example`), local artifacts, tests, docs, and Compose/Caddy configuration from the **Go image build context**. These files remain in your project directory; Compose still reads `.env` and mounts `Caddyfile` from the host.
-- The Dockerfile needs only Go source files and `go.mod` (plus `go.sum`, if generated) from the build context. Do not use `COPY .env` or set secrets using Docker `ARG`/`ENV` during image builds.
-
-### AWS S3
-
-For AWS use:
+Add the following variables to `.env`:
 
 ```dotenv
-S3_ENDPOINT=
-S3_FORCE_PATH_STYLE=false
-AWS_REGION=ap-east-1
+# Enable in-memory caching for 6 hours
+CACHE_TTL=6h
+
+# Maximum cache storage (MiB)
+CACHE_MAX_MB=128
+
+# Maximum size of a single cached object (MiB)
+CACHE_MAX_OBJECT_MB=8
+
+# Browser cache duration (5 minutes)
+DEFAULT_CACHE_CONTROL=public, max-age=300
 ```
 
-The service uses the AWS SDK for Go v2 default credential provider chain. In managed environments prefer an IAM role instead of static access keys. Minimal authorization for reading existing objects: `s3:GetObject` on `arn:aws:s3:::static/*`. To consistently distinguish missing keys (404) from access denied (403), AWS S3 also requires `s3:ListBucket` on the bucket; the application does **not** list bucket contents. Without ListBucket permission, AWS can return 403 for a missing object, which the gateway intentionally reports as an upstream error rather than guessing.
+| Variable | Default | Description |
+|---|---|---|
+| `CACHE_TTL` | `0s` | Internal cache duration. `0s` disables caching. |
+| `CACHE_MAX_MB` | `128` | Maximum memory budget for cached response bodies, in MiB. |
+| `CACHE_MAX_OBJECT_MB` | `8` | Maximum individual object size eligible for caching, in MiB. |
+| `DEFAULT_CACHE_CONTROL` | `public, max-age=60` | Fallback HTTP Cache-Control when S3 metadata does not specify one. |
 
-### S3-compatible services
+The memory limit applies to cached response bodies. Actual process
+memory usage will be higher due to metadata, allocations, and active
+requests.
 
-Set `S3_ENDPOINT=https://...`, `S3_FORCE_PATH_STYLE=true` and the appropriate `AWS_REGION`. For MinIO running in another Docker service, e.g. use `S3_ENDPOINT=http://minio:9000`, *not* `localhost:9000` (that would refer to the gateway container itself).
+### How caching works
 
-## HTTPS / Caddy vs Nginx
+On the first request:
 
-This compose stack intentionally listens on **HTTP port 8080** to work immediately and to sit behind an existing TLS-terminating reverse proxy/CDN. Caddy preserves the `Host` header when proxying; the gateway determines the bucket prefix from that header.
+1. Resolve the hostname to its S3 prefix.
+2. Look up the requested object in the gateway cache.
+3. If absent, retrieve the object from S3.
+4. Stream the response to the client.
+5. Cache successful, eligible responses.
+6. Mark the response with `X-Cache: MISS`.
 
-For public `https://*.example.com`, configure **wildcard DNS and a wildcard TLS certificate** (for example using DNS-01 with your DNS provider). Caddy's stock image does not include provider-specific DNS modules. You can terminate HTTPS with Cloudflare, a load balancer, or another proxy; alternatively, build Caddy with the appropriate DNS plugin and configure Caddy's `tls { dns ... }`, or mount a wildcard certificate and change the Caddyfile to a `*.example.com` site with `tls /certs/fullchain.pem /certs/privkey.pem` and expose 443.
+On subsequent requests:
 
-Nginx + Lua/OpenResty is possible, but you'd need to maintain AWS Signature V4 request signing, header handling, credentials, retries and API quirks. Here, the official Go SDK handles S3 API authentication, while Caddy deals with HTTP proxying.
+1. Find the matching cached object.
+2. Verify the cache entry has not expired.
+3. Return the cached response without contacting S3.
+4. Mark the response with `X-Cache: HIT`.
 
-## Behavior and limitations
+Cache entries are isolated by hostname and request path.
 
-- Only `GET` and `HEAD` are accepted; no uploads or directory listing.
-- `/` reads `{site}/index.html`; `/docs/` reads `{site}/docs/index.html`. `/docs` looks up an object literally named `{site}/docs`, unless SPA fallback is enabled.
-- Responses stream from S3; files are **not predownloaded** into the Docker image or permanently cached on the gateway. Place a CDN in front for significant request volume or set appropriate per-object `Cache-Control` metadata.
-- S3 `Content-Type` (with extension-based fallback when absent or octet-stream), `Content-Encoding`, `Cache-Control`, `ETag`, `Last-Modified` and `Content-Length` are forwarded; the gateway also supports ranged GET and conditional requests.
-- A missing object returns 404 when S3 signals `NoSuchKey`/`NotFound`. Credentials, permissions or S3 outages result in a gateway error (502).
-- The reserved `/_health` endpoint returns 200 without contacting S3.
-- Arbitrary custom domain mappings and nested subdomains are not implemented; a single subdomain label determines the S3 prefix.
-- Multiple slash/dot-segment path traversal is rejected or normalized to prevent reading outside a site's prefix.
+For example:
 
-## Tests
+```text
+test1.example.com/index.html
+  -> static/test1/index.html
+
+test2.example.com/index.html
+  -> static/test2/index.html
+```
+
+These requests do not share cached content.
+
+### Cache eligibility
+
+The gateway caches:
+
+- Successful HTTP 200 GET responses.
+- Objects smaller than `CACHE_MAX_OBJECT_MB`.
+- Responses with a valid Content-Length matching the complete body.
+- Responses without restrictive cache directives.
+
+The gateway does not cache:
+
+- HTTP 404 or 5xx responses.
+- Objects larger than the configured limit.
+- Incomplete S3 responses.
+- Requests with Range headers.
+- Conditional requests such as If-None-Match.
+- Requests with Authorization headers.
+- Responses marked `private`, `no-store`, or `no-cache`.
+- Responses containing Set-Cookie.
+- Health check responses.
+
+HEAD requests continue to use S3 directly.
+
+### Test caching
+
+Run:
 
 ```bash
-# Isolated routing/security tests use only Go standard library and can run offline:
-go test routing.go routing_test.go
-
-# Full application tests/build download AWS SDK modules:
-go test ./...
-go build ./...
+curl -sD - -o /dev/null https://test1.example.com/
 ```
+
+First request:
+
+```http
+HTTP/2 200
+X-Cache: MISS
+```
+
+Repeat:
+
+```bash
+curl -sD - -o /dev/null https://test1.example.com/
+```
+
+Expected response:
+
+```http
+HTTP/2 200
+X-Cache: HIT
+```
+
+To bypass the gateway cache:
+
+```bash
+curl -i \
+  -H "Cache-Control: no-cache" \
+  https://test1.example.com/
+```
+
+This forces a new upstream request but does not immediately
+invalidate an existing cached entry.
+
+If a CDN is serving the response, it may prevent the request from
+reaching the gateway. Test directly against the gateway to verify
+its internal cache behavior.
+
+### Cache eviction
+
+The gateway uses a Least Recently Used (LRU) eviction policy.
+
+When the cache reaches its configured capacity, older,
+less recently accessed entries are removed to make room for
+new content.
+
+Expired entries are removed when accessed.
+
+### Cache invalidation
+
+The cache is stored in process memory.
+
+It is cleared automatically when the gateway container restarts.
+
+For example:
+
+```bash
+docker compose restart gateway
+```
+
+This is a simple way to clear the entire cache after an S3 deployment.
+
+Individual object purging is not currently supported.
+
+### Important limitations
+
+- Cache state is not shared between gateway replicas.
+- Cache contents disappear when the process restarts.
+- Simultaneous cache misses can trigger multiple S3 requests.
+- Files exceeding the maximum object size are streamed from S3.
+- Content updated in S3 can remain stale until its gateway TTL expires.
+- The gateway cache TTL is independent of S3 Cache-Control metadata.
+- A 6-hour TTL can therefore retain content longer than its
+  browser-facing max-age directive.
+
+For frequently updated HTML, consider a shorter cache TTL or
+a deployment-triggered cache purge.
+
+For versioned JavaScript, CSS, images, and fonts, longer TTLs
+are generally appropriate.
+
+### Production recommendations
+
+Suggested configuration for small static websites:
+
+```dotenv
+CACHE_TTL=6h
+CACHE_MAX_MB=128
+CACHE_MAX_OBJECT_MB=8
+DEFAULT_CACHE_CONTROL=public, max-age=300
+```
+
+For high-traffic deployments, consider using Cloudflare or another
+CDN in front of the gateway to reduce requests reaching your server.
+
+The in-memory cache is intended for a single gateway instance
+or deployments where independent per-instance caches are acceptable.

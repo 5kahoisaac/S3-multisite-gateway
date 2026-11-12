@@ -81,9 +81,16 @@ func main() {
 		o.UsePathStyle = s.pathStyle
 	})
 	gateway := &gateway{client: client, cfg: s, logger: logger}
+
+	handler, err := withCache(gateway, logger)
+	if err != nil {
+		logger.Error("invalid cache configuration", "error", err)
+		os.Exit(1)
+	}
+
 	server := &http.Server{
 		Addr:              ":" + s.port,
-		Handler:           gateway,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		WriteTimeout:      0, // Streaming large S3 objects may exceed fixed write deadlines.
