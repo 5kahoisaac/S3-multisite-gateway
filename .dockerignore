@@ -1,0 +1,61 @@
+# Git metadata and repository configuration
+.git
+.git/**
+.gitignore
+.gitattributes
+.gitmodules
+.github/
+
+# Never send local credentials or environment files to Docker build context
+.env
+.env.*
+.envrc
+.direnv/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.credentials
+
+# Local development, editors, and OS files
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Unnecessary files for the production Go image
+README.md
+*.md
+compose.yaml
+Caddyfile
+*_test.go
+testdata/
+/bin/
+/build/
+/dist/
+s3-multisite
+*.exe
+*.test
+*.out
+*.prof
+*.pprof
+*.coverprofile
+coverage/
+coverage.*
+.go-build/
+
+# Logs, caches, temporary files, archives
+*.log
+logs/
+tmp/
+.temp/
+.cache/
+*.tmp
+*.zip
+*.tar
+*.tar.gz

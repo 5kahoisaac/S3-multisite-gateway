@@ -1,0 +1,6 @@
+# HTTP-only entry point. Terminate production HTTPS at your load balancer/CDN
+# or provide a wildcard certificate and update this Caddyfile.
+:80 {
+    encode zstd gzip
+    reverse_proxy gateway:8080
+}

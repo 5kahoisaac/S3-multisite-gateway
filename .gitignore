@@ -1,0 +1,50 @@
+# Environment files and local credentials
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.credentials
+
+# Go build artifacts and test output
+/bin/
+/build/
+/dist/
+/s3-multisite
+*.exe
+*.test
+*.out
+*.prof
+*.pprof
+*.coverprofile
+coverage/
+coverage.*
+.go-build/
+
+# Logs, temporary files, and caches
+*.log
+logs/
+tmp/
+.temp/
+.cache/
+*.tmp
+*.swp
+*.swo
+*~
+
+# IDE / editor / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local archives
+*.zip
+*.tar
+*.tar.gz
