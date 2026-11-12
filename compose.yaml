@@ -16,10 +16,15 @@ services:
 
   caddy:
     image: caddy:2-alpine
+    command:
+      - caddy
+      - reverse-proxy
+      - --from
+      - ":80"
+      - --to
+      - gateway:8080
     ports:
       - "${HTTP_PORT:-8080}:80"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
       - gateway
     restart: unless-stopped
